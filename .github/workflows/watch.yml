@@ -2,7 +2,7 @@ name: Watch patch notes
 
 on:
   schedule:
-    # 毎時 7 分（UTC）。00 分ちょうどは GitHub 全体で混み、遅れやすい
+    # 毎時 7 分（UTC。日本時間でも毎時 7 分）。00 分ちょうどは GitHub 全体で混み、遅れやすい
     - cron: "7 * * * *"
   workflow_dispatch:
     inputs:

@@ -1,0 +1,5 @@
+__pycache__/
+.pytest_cache/
+.venv/
+# 状態は state ブランチに置く。手元で動かしたときの状態ファイルは入れない
+state/

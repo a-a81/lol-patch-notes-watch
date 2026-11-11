@@ -1,0 +1,74 @@
+name: Watch patch notes
+
+on:
+  schedule:
+    # 毎時 7 分（UTC）。00 分ちょうどは GitHub 全体で混み、遅れやすい
+    - cron: "7 * * * *"
+  workflow_dispatch:
+    inputs:
+      send_latest:
+        description: 最新の記事の URL を 1 件送って Webhook の設定を確かめる（状態は変えない）
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: watch-patch-notes
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check out state branch
+        run: |
+          if git fetch --depth=1 origin state; then
+            git worktree add --detach state FETCH_HEAD
+          else
+            echo "state ブランチがまだないので作ります"
+            git worktree add --detach state
+            git -C state switch --orphan state
+          fi
+
+      - name: Watch
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: >-
+          python -m patchwatch
+          --state state/state.json
+          --commit-message-file "$RUNNER_TEMP/commit-message.txt"
+          ${{ inputs.send_latest && '--send-latest' || '' }}
+
+      # 送信に一部失敗した回も、送れた分の記録は残す
+      - name: Save state
+        if: ${{ !cancelled() }}
+        working-directory: state
+        run: |
+          if [ ! -f state.json ]; then
+            echo "状態ファイルがありません"
+            exit 0
+          fi
+          git add state.json
+          if git diff --cached --quiet; then
+            echo "状態に変化はありません"
+            exit 0
+          fi
+          message_file="$RUNNER_TEMP/commit-message.txt"
+          if [ -s "$message_file" ]; then
+            message_args=(-F "$message_file")
+          else
+            message_args=(-m "Update state")
+          fi
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              commit "${message_args[@]}"
+          git push origin HEAD:state

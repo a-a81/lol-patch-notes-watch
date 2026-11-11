@@ -1,0 +1,12 @@
+[project]
+name = "lol-patch-notes-watch"
+version = "1.0.0"
+description = "League of Legends の日本語パッチノート一覧を見張り、新しい記事と更新された記事の URL を Discord に貼る"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

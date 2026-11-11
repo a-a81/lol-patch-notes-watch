@@ -4,6 +4,7 @@
 見た目の HTML ではなくこの JSON を読むので、デザインが変わっても壊れにくい。
 """
 
+import gzip
 import json
 import re
 import time
@@ -33,12 +34,17 @@ class ListEntry:
 
 
 def fetch_text(url, *, opener=urllib.request.urlopen, sleep=time.sleep, attempts=3):
-    """ページを取得する。5xx・429・通信エラーは少し待ってやり直し、それ以外の 4xx はすぐ諦める。"""
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept-Language": "ja"})
+    """ページを gzip で取得する。5xx・429・通信エラーは少し待ってやり直し、それ以外の 4xx はすぐ諦める。"""
+    request = urllib.request.Request(
+        url, headers={"User-Agent": USER_AGENT, "Accept-Language": "ja", "Accept-Encoding": "gzip"}
+    )
     for attempt in range(attempts):
         try:
             with opener(request, timeout=20) as response:
-                return response.read().decode("utf-8")
+                body = response.read()
+                if (response.headers.get("Content-Encoding") or "").lower() == "gzip":
+                    body = gzip.decompress(body)
+                return body.decode("utf-8")
         except urllib.error.HTTPError as error:
             if error.code < 500 and error.code != 429:
                 raise
@@ -51,7 +57,10 @@ def fetch_text(url, *, opener=urllib.request.urlopen, sleep=time.sleep, attempts
 
 
 def parse_list(html):
-    """一覧ページの記事を、ページに出ている順（新しい順）で返す。"""
+    """一覧ページの記事を、ページに出ている順（新しい順）で返す。
+
+    使うのは最新の 1 件だけだが、ページの形が変わったことに早く気づけるよう、全件を確かめる。
+    """
     match = _NEXT_DATA.search(html)
     if not match:
         raise ScrapeError("__NEXT_DATA__ が見つかりません")

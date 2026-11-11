@@ -1,3 +1,4 @@
+import gzip
 import io
 import urllib.error
 
@@ -58,6 +59,10 @@ def test_parse_list_reports_which_item_is_broken():
 
 
 class FakeResponse(io.BytesIO):
+    def __init__(self, body, headers=None):
+        super().__init__(body)
+        self.headers = headers or {}
+
     def __enter__(self):
         return self
 
@@ -91,12 +96,23 @@ def test_fetch_text_gives_up_on_not_found():
         fetch_text("https://example.com", opener=opener, sleep=lambda seconds: pytest.fail("待たずに諦める"))
 
 
-def test_fetch_text_sends_user_agent():
+def test_fetch_text_sends_user_agent_and_asks_for_gzip():
     sent = {}
 
     def opener(request, timeout):
         sent["agent"] = request.get_header("User-agent")
+        sent["encoding"] = request.get_header("Accept-encoding")
         return FakeResponse(b"ok")
 
-    fetch_text("https://example.com", opener=opener)
+    assert fetch_text("https://example.com", opener=opener) == "ok"
     assert sent["agent"].startswith("lol-patch-notes-watch/")
+    assert sent["encoding"] == "gzip"
+
+
+def test_fetch_text_decompresses_gzip():
+    body = gzip.compress("パッチノート一覧".encode("utf-8"))
+
+    def opener(request, timeout):
+        return FakeResponse(body, {"Content-Encoding": "gzip"})
+
+    assert fetch_text("https://example.com", opener=opener) == "パッチノート一覧"

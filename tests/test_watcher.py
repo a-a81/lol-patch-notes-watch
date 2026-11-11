@@ -1,45 +1,44 @@
 import pytest
 
 from patchwatch.state import empty_state
-from patchwatch.watcher import NEW, UPDATED, NotifyError, find_changes, run
+from patchwatch.watcher import NEW, UPDATED, NotifyError, latest_entry, run
 from pages import entry
 
 
 class Discord:
-    def __init__(self, fail_on=()):
+    def __init__(self, fail=False):
         self.posted = []
-        self.fail_on = set(fail_on)
+        self.fail = fail
 
     def __call__(self, url):
-        if url in self.fail_on:
+        if self.fail:
             raise NotifyError("Discord が 500 を返しました（3 回試しました）")
         self.posted.append(url)
 
 
-def watch(state, entries, discord=None, **options):
+def watch(state, entries, discord=None):
     discord = discord or Discord()
     saves = []
-    result = run(state, entries, notify=discord, save=lambda: saves.append(True), **options)
+    result = run(state, entries, notify=discord, save=lambda: saves.append(True))
     return result, discord, saves
 
 
-def state_with(*entries):
+def state_with(latest):
     state = empty_state()
-    run(state, list(entries), notify=lambda url: pytest.fail("初回は送らない"), save=lambda: None)
+    run(state, [latest], notify=lambda url: pytest.fail("初回は送らない"), save=lambda: None)
     return state
 
 
-def test_first_run_records_everything_without_posting():
+def test_first_run_records_the_latest_without_posting():
     state = empty_state()
-    entries = [entry(22), entry(21), entry(20)]
 
-    result, discord, saves = watch(state, entries)
+    result, discord, saves = watch(state, [entry(22), entry(21)])
 
-    assert result.baseline == 3
+    assert result.baseline == entry(22)
     assert discord.posted == []
-    assert result.failures == []
     assert saves
-    assert state["articles"]["patchNote.22.ja-jp"] == {
+    assert state["latest"] == {
+        "contentId": "patchNote.22.ja-jp",
         "title": "パッチノート 26.22",
         "url": "https://www.leagueoflegends.com/ja-jp/news/game-updates/patch-26-22-notes",
         "publishedAt": entry(22).published_at,
@@ -47,91 +46,71 @@ def test_first_run_records_everything_without_posting():
     }
 
 
-def test_nothing_changed_posts_nothing_and_saves_nothing():
-    state = state_with(entry(22), entry(21))
+def test_nothing_changed_posts_and_saves_nothing():
+    state = state_with(entry(22))
 
     result, discord, saves = watch(state, [entry(22), entry(21)])
 
     assert discord.posted == []
-    assert result.posted == []
+    assert result.posted is None
     assert saves == []
 
 
 def test_new_article_is_posted_and_recorded():
-    state = state_with(entry(21), entry(20))
+    state = state_with(entry(22))
 
-    result, discord, _ = watch(state, [entry(22), entry(21), entry(20)])
+    result, discord, saves = watch(state, [entry(23), entry(22)])
 
-    assert discord.posted == [entry(22).url]
-    assert [change.kind for change in result.posted] == [NEW]
-    assert state["articles"]["patchNote.22.ja-jp"]["rev"] == "r1"
+    assert discord.posted == [entry(23).url]
+    assert result.posted.kind == NEW
+    assert state["latest"]["contentId"] == "patchNote.23.ja-jp"
+    assert saves
 
 
-def test_updated_article_is_posted_when_rev_changes():
-    state = state_with(entry(22), entry(21))
+def test_updated_latest_article_is_posted():
+    state = state_with(entry(22))
 
     result, discord, _ = watch(state, [entry(22, rev="r2"), entry(21)])
 
     assert discord.posted == [entry(22).url]
-    assert [change.kind for change in result.posted] == [UPDATED]
-    assert state["articles"]["patchNote.22.ja-jp"]["rev"] == "r2"
+    assert result.posted.kind == UPDATED
+    assert state["latest"]["rev"] == "r2"
 
 
-def test_changes_are_posted_oldest_first():
-    state = state_with(entry(20))
+def test_older_articles_are_ignored_even_if_they_change():
+    state = state_with(entry(22))
 
-    _, discord, _ = watch(state, [entry(23), entry(22), entry(21, rev="r2"), entry(20, rev="r2")])
-
-    assert discord.posted == [entry(20).url, entry(21).url, entry(22).url, entry(23).url]
-
-
-def test_failed_post_is_retried_next_time_and_keeps_order():
-    state = state_with(entry(20))
-    entries = [entry(22), entry(21), entry(20)]
-
-    result, discord, _ = watch(state, entries, Discord(fail_on={entry(21).url}))
+    _, discord, _ = watch(state, [entry(22), entry(21, rev="r2"), entry(20, rev="r9")])
 
     assert discord.posted == []
-    assert len(result.failures) == 1
-    assert "パッチノート 26.21" in result.failures[0]
-    assert "patchNote.21.ja-jp" not in state["articles"]
-    assert "patchNote.22.ja-jp" not in state["articles"]
 
-    result, discord, _ = watch(state, entries)
 
-    assert discord.posted == [entry(21).url, entry(22).url]
+def test_failed_post_is_retried_next_time():
+    state = state_with(entry(22))
+
+    result, _, saves = watch(state, [entry(23), entry(22)], Discord(fail=True))
+
+    assert "パッチノート 26.23" in result.failures[0]
+    assert state["latest"]["contentId"] == "patchNote.22.ja-jp"
+    assert saves == []
+
+    result, discord, _ = watch(state, [entry(23), entry(22)])
+
+    assert discord.posted == [entry(23).url]
     assert result.failures == []
 
 
-def test_each_successful_post_is_saved_right_away():
-    state = state_with(entry(20))
+def test_removed_latest_article_does_not_post_the_older_one():
+    state = state_with(entry(23))
 
-    _, _, saves = watch(state, [entry(22), entry(21), entry(20)])
-
-    assert len(saves) == 2
-
-
-def test_too_many_changes_are_recorded_without_posting():
-    state = state_with(entry(20))
-    entries = [entry(number) for number in range(26, 19, -1)]
-
-    result, discord, _ = watch(state, entries, max_changes=5)
+    result, discord, saves = watch(state, [entry(22), entry(21)])
 
     assert discord.posted == []
-    assert result.suppressed == 6
-    assert "上限の 5 件" in result.failures[0]
-    assert len(state["articles"]) == 7
+    assert "パッチノート 26.23" in result.skipped
+    assert result.failures == []
+    assert state["latest"]["contentId"] == "patchNote.23.ja-jp"
+    assert saves == []
 
 
-def test_article_that_left_the_list_is_kept():
-    state = state_with(entry(22), entry(21))
-
-    _, discord, _ = watch(state, [entry(22)])
-
-    assert discord.posted == []
-    assert "patchNote.21.ja-jp" in state["articles"]
-
-
-def test_find_changes_ignores_duplicates_in_the_list():
-    changes = find_changes({}, [entry(22), entry(22)])
-    assert [change.entry for change in changes] == [entry(22)]
+def test_latest_entry_uses_publish_date_not_page_order():
+    assert latest_entry([entry(21), entry(23), entry(22)]) == entry(23)

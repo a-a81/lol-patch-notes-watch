@@ -1,4 +1,4 @@
-"""パッチノート一覧を確認し、新しい記事と更新された記事の URL を Discord に貼る。
+"""パッチノート一覧の最新の記事を確認し、新しい記事か更新された記事なら URL を Discord に貼る。
 
 例:
   python -m patchwatch --dry-run             送らずに、貼る URL をログに出す（状態も保存しない）
@@ -17,7 +17,7 @@ from pathlib import Path
 from .discord import is_webhook_url, post_message
 from .riot import LIST_URL, ScrapeError, fetch_text, parse_list
 from .state import load_state, save_state
-from .watcher import NEW, UPDATED, NotifyError, run
+from .watcher import NEW, UPDATED, NotifyError, latest_entry, run
 
 log = logging.getLogger("patchwatch")
 KIND_LABELS = {NEW: "新着", UPDATED: "更新"}
@@ -26,7 +26,6 @@ KIND_LABELS = {NEW: "新着", UPDATED: "更新"}
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="python -m patchwatch", description=__doc__.splitlines()[0])
     parser.add_argument("--state", default="state/state.json", help="状態ファイルの場所")
-    parser.add_argument("--max-changes", type=int, default=5, help="1 回に貼る URL の上限")
     parser.add_argument("--dry-run", action="store_true", help="送らずに貼る URL をログに出す。状態も保存しない")
     parser.add_argument("--send-latest", action="store_true", help="最新の記事の URL を 1 件送って終わる")
     parser.add_argument("--commit-message-file", help="state ブランチの commit メッセージを書き出すファイル")
@@ -67,7 +66,7 @@ def main(argv=None):
     log.info("一覧の記事: %d 件", len(entries))
 
     if args.send_latest:
-        latest = max(entries, key=lambda entry: entry.published_at)
+        latest = latest_entry(entries)
         try:
             notify(latest.url)
         except NotifyError as error:
@@ -77,9 +76,9 @@ def main(argv=None):
         return 0
 
     save = (lambda: None) if args.dry_run else (lambda: save_state(state_path, state))
-    result = run(state, entries, notify=notify, save=save, max_changes=args.max_changes)
+    result = run(state, entries, notify=notify, save=save)
 
-    report(result, len(entries), summary, posted_label="dry-run で貼る予定" if args.dry_run else "貼りました")
+    report(result, summary, posted_label="dry-run で貼る予定" if args.dry_run else "貼りました")
     if args.commit_message_file:
         message = commit_message(result)
         if message:
@@ -87,19 +86,23 @@ def main(argv=None):
     return 1 if result.failures else 0
 
 
-def report(result, entry_count, summary, posted_label):
-    lines = ["## パッチノートの確認", "", "- 一覧の記事: {} 件".format(entry_count)]
+def report(result, summary, posted_label):
+    lines = ["## パッチノートの確認", ""]
     if result.baseline:
-        log.info("初回なので %d 件を通知せずに記録しました", result.baseline)
-        lines.append("- 初回なので {} 件を通知せずに記録しました".format(result.baseline))
-    for change in result.posted:
-        kind = KIND_LABELS[change.kind]
-        log.info("%s（%s）: %s %s", posted_label, kind, change.entry.title, change.entry.url)
-        lines.append("- {}（{}）: [{}]({})".format(posted_label, kind, change.entry.title, change.entry.url))
+        log.info("初回なので、最新の記事を通知せずに記録しました: %s", result.baseline.title)
+        lines.append("- 初回なので、最新の記事を通知せずに記録しました: {}".format(_link(result.baseline)))
+    if result.posted:
+        entry = result.posted.entry
+        kind = KIND_LABELS[result.posted.kind]
+        log.info("%s（%s）: %s %s", posted_label, kind, entry.title, entry.url)
+        lines.append("- {}（{}）: {}".format(posted_label, kind, _link(entry)))
+    if result.skipped:
+        log.info(result.skipped)
+        lines.append("- " + result.skipped)
     for failure in result.failures:
         log.error("失敗: %s", failure)
         lines.append("- 失敗: {}".format(failure))
-    if not (result.baseline or result.posted or result.failures):
+    if not (result.baseline or result.posted or result.skipped or result.failures):
         log.info("変化はありませんでした")
         lines.append("- 変化はありませんでした")
     summary.write("\n".join(lines))
@@ -107,13 +110,14 @@ def report(result, entry_count, summary, posted_label):
 
 def commit_message(result):
     if result.baseline:
-        return "Baseline {} articles".format(result.baseline)
-    if result.suppressed:
-        return "Record {} changes without posting".format(result.suppressed)
-    lines = ["{}: {}".format("New" if change.kind == NEW else "Updated", change.entry.title) for change in result.posted]
-    if len(lines) > 1:
-        return "Post {} articles\n\n".format(len(lines)) + "\n".join(lines)
-    return lines[0] if lines else ""
+        return "Baseline: {}".format(result.baseline.title)
+    if result.posted:
+        return "{}: {}".format("New" if result.posted.kind == NEW else "Updated", result.posted.entry.title)
+    return ""
+
+
+def _link(entry):
+    return "[{}]({})".format(entry.title, entry.url)
 
 
 class Summary:
